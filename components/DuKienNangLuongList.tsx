@@ -15,13 +15,41 @@ const normalizeKeys = (obj: any) => {
   return newObj;
 };
 
+const parseDateStr = (dateStr: string | null | undefined): Date | null => {
+  if (!dateStr) return null;
+  const clean = String(dateStr).includes('T') ? String(dateStr).split('T')[0] : String(dateStr);
+  if (clean.includes('-')) {
+    const [y, m, d] = clean.split('-').map(Number);
+    if (!y || !m || !d) return null;
+    return new Date(y, m - 1, d);
+  }
+  if (clean.includes('/')) {
+    const [d, m, y] = clean.split('/').map(Number);
+    if (!y || !m || !d) return null;
+    return new Date(y, m - 1, d);
+  }
+  const parsed = new Date(dateStr);
+  return isNaN(parsed.getTime()) ? null : parsed;
+};
+
 export const DuKienNangLuongList: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [hslList, setHslList] = useState<DanhSachHSL[]>([]);
   const [hslCatalog, setHslCatalog] = useState<DanhMucHSL[]>([]);
-  const [selectedPeriod, setSelectedPeriod] = useState<string>('Q1');
   const [searchTerm, setSearchTerm] = useState('');
   
+  const currentYear = new Date().getFullYear();
+
+  const yearOptions = useMemo(() => {
+    const list: number[] = [];
+    for (let y = 2010; y <= currentYear + 1; y++) {
+      list.push(y);
+    }
+    return list;
+  }, [currentYear]);
+
+  const [selectedYear, setSelectedYear] = useState<number>(currentYear + 1);
+
   // Filters
   const [filterDept, setFilterDept] = useState('');
   const [filterLevel, setFilterLevel] = useState('');
@@ -32,17 +60,6 @@ export const DuKienNangLuongList: React.FC = () => {
     setAlertMessage(message);
     setIsAlertModalOpen(true);
   };
-
-  const currentYear = new Date().getFullYear();
-  const nextYear = currentYear + 1;
-
-  const periods = [
-    { id: 'Q1', label: 'Quý 1', start: '01/01', end: '31/03' },
-    { id: 'Q2', label: 'Quý 2', start: '01/04', end: '30/06' },
-    { id: 'Q3', label: 'Quý 3', start: '01/07', end: '30/09' },
-    { id: 'Q4', label: 'Quý 4', start: '01/10', end: '31/12' },
-    { id: 'NY', label: `Năm ${nextYear}`, start: '01/01', end: '31/12' }
-  ];
 
   const fetchData = async () => {
     setLoading(true);
@@ -68,20 +85,32 @@ export const DuKienNangLuongList: React.FC = () => {
 
       const processed = (hslRes.data || []).map(item => {
         const h = normalizeKeys(item) as DanhSachHSL;
+        // Chỉ xét nâng lương đối với nhân sự có giá trị dienxet = true (Diện xét là Có)
+        if (h.dienxet !== true && String(h.dienxet).toLowerCase() !== 'true') return null;
+
         const emp = employees.find(e => String(e.manv) === String(h.manv));
         if (!emp) return null;
 
+        // Căn cứ vào manangluong của Nhân sự, tra trong Table DanhMucHSL để tìm mucnangheso và sonamnangbac
         const rule = catalog.find(c => String(c.maso) === String(h.manangluong));
         if (!rule) return null;
 
-        // Calculate due date
-        const startDate = new Date(h.thoigianbatdau);
-        const dueDate = new Date(startDate);
-        dueDate.setFullYear(dueDate.getFullYear() + (rule.sonamnangbac || 0));
+        // Quy đổi sonamnangbac ra tháng
+        const soNamNangBac = Number(rule.sonamnangbac) || 0;
+        const soThangNangBac = soNamNangBac * 12;
 
-        // New salary logic
-        const newHsl = parseFloat(((h.hsl || 0) + (rule.mucnangheso || 0)).toFixed(2));
-        const isOver = newHsl > (rule.hesotoida || 999);
+        // Tìm thời gian đến hạn nâng lương = thoigianbatdau + số tháng được quy đổi từ sonamnangbac
+        const startDate = parseDateStr(h.thoigianbatdau);
+        if (!startDate) return null;
+
+        const dueDate = new Date(startDate.getFullYear(), startDate.getMonth() + soThangNangBac, startDate.getDate());
+
+        // HSL sẽ được hưởng = HSL + mucnangheso, nếu tổng > hesotoida thì ghi chú là "HSL vượt bậc"
+        const currentHsl = parseFloat(String(h.hsl || 0));
+        const mucNang = parseFloat(String(rule.mucnangheso || 0));
+        const newHsl = parseFloat((currentHsl + mucNang).toFixed(2));
+        const heSoToiDa = rule.hesotoida !== undefined && rule.hesotoida !== null ? parseFloat(String(rule.hesotoida)) : 999;
+        const isOver = newHsl > heSoToiDa;
 
         return {
           ...h,
@@ -91,7 +120,9 @@ export const DuKienNangLuongList: React.FC = () => {
           ten_trinhdo: trinhDos.find(t => String(t.matrinhdo) === String(emp.trinhdo))?.giatri || emp.trinhdo,
           ten_phongban: phongBans.find(p => String(p.maphongban) === String(emp.phongban))?.giatri || emp.phongban,
           ten_chucvu: chucVus.find(c => String(c.machucvu) === String(emp.chucvu))?.giatri || emp.chucvu,
+          startDate,
           dueDate,
+          soThangNangBac,
           newHsl,
           ghiChu: isOver ? 'HSL vượt bậc' : ''
         };
@@ -110,15 +141,10 @@ export const DuKienNangLuongList: React.FC = () => {
   }, []);
 
   const filteredData = useMemo(() => {
-    const selected = periods.find(p => p.id === selectedPeriod);
-    if (!selected) return [];
-
-    const periodYear = selectedPeriod === 'NY' ? nextYear : currentYear;
-    const [day, month] = selected.end.split('/').map(Number);
-    const periodEndDate = new Date(periodYear, month - 1, day, 23, 59, 59);
+    const periodEndDate = new Date(selectedYear, 11, 31, 23, 59, 59);
 
     return hslList.filter(item => {
-      // 1. Time logic: dueDate <= periodEndDate
+      // 1. Time logic: thời điểm đến hạn <= ngày 31/12 của năm được chọn
       if ((item as any).dueDate > periodEndDate) return false;
 
       // 2. Search logic
@@ -131,20 +157,20 @@ export const DuKienNangLuongList: React.FC = () => {
       if (filterLevel && (item as any).ten_trinhdo !== filterLevel) return false;
 
       return true;
-    }).sort((a, b) => (a as any).dueDate - (b as any).dueDate);
-  }, [hslList, selectedPeriod, searchTerm, filterDept, filterLevel, currentYear, nextYear]);
+    }).sort((a, b) => (a as any).dueDate.getTime() - (b as any).dueDate.getTime());
+  }, [hslList, selectedYear, searchTerm, filterDept, filterLevel]);
 
   const uniqueDepts = useMemo(() => Array.from(new Set(hslList.map(i => (i as any).ten_phongban))).sort(), [hslList]);
   const uniqueLevels = useMemo(() => Array.from(new Set(hslList.map(i => (i as any).ten_trinhdo))).sort(), [hslList]);
 
   const formatDate = (d: any) => {
     if (!d) return '---';
-    const date = new Date(d);
+    const date = d instanceof Date ? d : parseDateStr(String(d));
+    if (!date || isNaN(date.getTime())) return '---';
     return `${String(date.getDate()).padStart(2, '0')}/${String(date.getMonth() + 1).padStart(2, '0')}/${date.getFullYear()}`;
   };
 
   const handleExportExcel = () => {
-    const periodLabel = periods.find(p => p.id === selectedPeriod)?.label || '';
     const exportData = filteredData.map((item, idx) => ({
       'STT': idx + 1,
       'Mã nhân viên': item.manv,
@@ -165,7 +191,7 @@ export const DuKienNangLuongList: React.FC = () => {
     XLSX.utils.book_append_sheet(wb, ws, "Dự kiến nâng lương");
     
     // Xuất file XLSX với UTF-8 (mặc định trong xlsx library)
-    XLSX.writeFile(wb, `DanhSachDuKienNangLuong_${selectedPeriod}_${currentYear}.xlsx`);
+    XLSX.writeFile(wb, `DanhSachDuKienNangLuong_${selectedYear}.xlsx`);
   };
 
   if (loading) {
@@ -189,14 +215,14 @@ export const DuKienNangLuongList: React.FC = () => {
         </div>
         
         <div className="flex items-center gap-3 bg-blue-50 px-4 py-2 rounded-xl border border-blue-100">
-           <span className="text-xs font-bold text-blue-700 whitespace-nowrap">Thời gian dự kiến nâng lương:</span>
+           <span className="text-xs font-bold text-blue-700 whitespace-nowrap">Năm dự kiến nâng lương:</span>
            <div className="relative">
              <select 
-               value={selectedPeriod}
-               onChange={e => setSelectedPeriod(e.target.value)}
+               value={selectedYear}
+               onChange={e => setSelectedYear(Number(e.target.value))}
                className="bg-white border border-blue-200 rounded-lg text-sm font-bold text-blue-900 px-8 py-1.5 appearance-none focus:ring-2 focus:ring-blue-400 outline-none cursor-pointer"
              >
-               {periods.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
+               {yearOptions.map(y => <option key={y} value={y}>{y}</option>)}
              </select>
              <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 h-4 w-4 text-blue-400 pointer-events-none" />
            </div>
@@ -315,7 +341,7 @@ export const DuKienNangLuongList: React.FC = () => {
               {filteredData.length === 0 && (
                 <tr>
                   <td colSpan={12} className="px-6 py-20 text-center text-gray-400 italic">
-                    Không có nhân sự nào đến hạn nâng lương trong khoảng thời gian đã chọn.
+                    Không có nhân sự nào đến hạn nâng lương trong năm {selectedYear}.
                   </td>
                 </tr>
               )}
